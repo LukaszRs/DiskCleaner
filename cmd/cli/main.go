@@ -2,10 +2,12 @@ package main
 
 import (
 	"database/sql"
+	"duplicates/internal/models"
 	"duplicates/internal/repositories"
-	"duplicates/internal/services"
+	"duplicates/internal/utils"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -24,15 +26,40 @@ func main() {
 	defer db.Close()
 	repositories.Create(db)
 
-	outputChan := make(chan services.FileDef)
+	dirPool := utils.NewPool(10)
+	outputChan := make(chan models.FileDef)
 	go func() {
 		for file := range outputChan {
-			repositories.InsertFile(db, file)
+			if file.IsDir {
+				dirPool.AddTask(utils.DirectoryToProcess{Path: filepath.Join(file.Path, file.Filename), ResultChan: outputChan})
+			} else {
+				repositories.InsertFile(db, file)
+			}
 		}
 	}()
 
-	p := services.NewPool(10, outputChan)
-	p.Run()
-	p.AddTask(services.DirectoryToProcess{Path: folder})
-	p.Close()
+	dirPool.Run()
+	dirPool.AddTask(utils.DirectoryToProcess{Path: folder, ResultChan: outputChan})
+	dirPool.Close()
+
+	fmt.Println("Calculating hashes")
+	filePool := utils.NewPool(10)
+	outputChan = make(chan models.FileDef)
+	go func() {
+		for file := range outputChan {
+			repositories.UpdateHash(db, file.ID, file.Hash)
+		}
+	}()
+
+	filePool.Run()
+	files := repositories.GetPotentialDuplicates(db)
+	for _, f := range files {
+		filePool.AddTask(utils.FileToProcess{File: f, ResultChan: outputChan})
+	}
+
+	fmt.Println("Found duplicates:")
+	duplicates := repositories.GetDuplicates(db)
+	for _, f := range duplicates {
+		fmt.Println(f.Path, f.Filename)
+	}
 }

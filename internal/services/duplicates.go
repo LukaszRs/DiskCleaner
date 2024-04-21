@@ -1,6 +1,8 @@
 package services
 
 import (
+	"crypto/md5"
+	"duplicates/internal/models"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -11,17 +13,7 @@ import (
 	"time"
 )
 
-type FileDef struct {
-	Path       string
-	Filename   string
-	Size       int64
-	CreatedAt  string
-	ModifiedAt string
-	Checksum   string
-	Hash       string
-}
-
-func GoOverFiles(path string, pool *Pool) {
+func GoOverFiles(path string, result chan models.FileDef) {
 	fmt.Println("Searching duplicates in :", path)
 
 	items, err := ioutil.ReadDir(path)
@@ -35,17 +27,21 @@ func GoOverFiles(path string, pool *Pool) {
 			continue
 		}
 		if item.IsDir() {
-			fmt.Println("Found directory " + item.Name() + " spinning new thread")
-			pool.AddTask(DirectoryToProcess{Path: filepath.Join(path, item.Name())})
+			//fmt.Println("Found directory " + item.Name())
+			result <- models.FileDef{
+				IsDir:    true,
+				Path:     path,
+				Filename: item.Name(),
+			}
 		} else {
-			fmt.Println("Found file " + item.Name())
 			stat := item.Sys().(*syscall.Stat_t)
 			checksum, err := calculateChecksum(filepath.Join(path, item.Name()))
 			if err != nil {
 				fmt.Println("Error calculating checksum for ", path, err)
 			}
-			pool.outputChan <- FileDef{
+			result <- models.FileDef{
 				Path:       path,
+				IsDir:      false,
 				Filename:   item.Name(),
 				Size:       item.Size(),
 				CreatedAt:  time.Unix(int64(stat.Ctim.Sec), int64(stat.Ctim.Nsec)).String(),
@@ -55,6 +51,25 @@ func GoOverFiles(path string, pool *Pool) {
 			}
 		}
 	}
+}
+
+func CalculateHash(file models.FileDef, result chan models.FileDef) {
+	f, err := os.Open(filepath.Join(file.Path, file.Filename))
+	if err != nil {
+		fmt.Println("Error opening file", err)
+		return
+	}
+	defer f.Close()
+
+	hash := md5.New()
+	if _, err := io.Copy(hash, f); err != nil {
+		fmt.Println("Error calculating hash for file", err)
+		return
+	}
+
+	hashInBytes := hash.Sum(nil)[:16]
+	file.Hash = hex.EncodeToString(hashInBytes)
+	result <- file
 }
 
 func calculateChecksum(path string) (string, error) {
